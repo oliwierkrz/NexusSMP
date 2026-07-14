@@ -22,7 +22,6 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.scoreboard.*;
 import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
 import java.io.File;
 import java.io.IOException;
@@ -33,26 +32,19 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * ═══════════════════════════════════════════════════════════════════
- *  NexusStats  -  Economy + Scoreboard        [PLUGIN 1 of 3]
- * ═══════════════════════════════════════════════════════════════════
- *
- *  Commands are registered IN CODE via Paper's Brigadier lifecycle -
- *  NOT through any YAML file. This works whether the manifest is
- *  plugin.yml or paper-plugin.yml, so the whole "Paper plugins don't
- *  support YAML commands" crash can never happen again.
- * ═══════════════════════════════════════════════════════════════════
+ * NexusStats - Economy + Scoreboard [PLUGIN 1 of 3]
+ * Commands registered in code (Brigadier), not YAML.
+ * Exposes depositPublic() and fmtPublic() so NexusSell/NexusShop
+ * can hook in via reflection.
  */
 public final class NexusStats extends JavaPlugin implements Listener {
 
-    // ── Blue theme ──────────────────────────────────────────────────
     public static final TextColor BLUE_BRIGHT = TextColor.fromHexString("#4FC3F7");
     public static final TextColor BLUE_DEEP   = TextColor.fromHexString("#0D47A1");
     public static final TextColor MONEY       = TextColor.fromHexString("#00E676");
     public static final TextColor GREY        = TextColor.fromHexString("#9E9E9E");
     public static final TextColor WHITE       = TextColor.fromHexString("#FFFFFF");
 
-    /** Balance in CENTS as long. Never use double for money. */
     private final Map<UUID, Long> balances = new ConcurrentHashMap<>();
     private final Map<UUID, Board> boards  = new ConcurrentHashMap<>();
     private final AtomicBoolean dirty      = new AtomicBoolean(false);
@@ -68,13 +60,8 @@ public final class NexusStats extends JavaPlugin implements Listener {
         this.dataFile = new File(getDataFolder(), "balances.yml");
         loadBalances();
 
-        // Register as a service so NexusShop/NexusSell can find us.
-        Bukkit.getServicesManager().register(
-                NexusBank.class, new BankImpl(), this, ServicePriority.Normal);
-
         getServer().getPluginManager().registerEvents(this, this);
 
-        // ═══ Commands registered IN CODE (no YAML) ═══
         this.getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, event -> {
             var commands = event.registrar();
             commands.register("balance", "Show your balance", List.of("bal", "money"),
@@ -106,13 +93,12 @@ public final class NexusStats extends JavaPlugin implements Listener {
         save();
         boards.values().forEach(Board::destroy);
         boards.clear();
-        Bukkit.getServicesManager().unregisterAll(this);
     }
 
-    /**
-     * Tiny adapter: lets us hand a (sender, args) lambda to Paper's
-     * Brigadier command registrar without writing a class per command.
-     */
+    // ── Public hooks for NexusSell / NexusShop (called via reflection) ──
+    public void depositPublic(UUID id, long cents) { deposit(id, cents); }
+    public String fmtPublic(long cents) { return fmt(cents); }
+
     private static final class SimpleCmd implements BasicCommand {
         interface Handler { void run(CommandSender sender, String[] args); }
         private final Handler handler;
@@ -122,27 +108,6 @@ public final class NexusStats extends JavaPlugin implements Listener {
             handler.run(stack.getSender(), args);
         }
     }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  SERVICE INTERFACE  (identical in Shop and Sell)
-    // ═══════════════════════════════════════════════════════════════
-    public interface NexusBank {
-        long getCents(UUID id);
-        void give(UUID id, long cents);
-        boolean take(UUID id, long cents);
-        String format(long cents);
-    }
-
-    private final class BankImpl implements NexusBank {
-        @Override public long getCents(UUID id)        { return balance(id); }
-        @Override public void give(UUID id, long c)    { deposit(id, c); }
-        @Override public boolean take(UUID id, long c) { return withdraw(id, c); }
-        @Override public String format(long c)         { return fmt(c); }
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  ECONOMY
-    // ═══════════════════════════════════════════════════════════════
 
     private void ensure(UUID id) {
         if (balances.putIfAbsent(id, startBalance) == null) dirty.set(true);
@@ -173,10 +138,6 @@ public final class NexusStats extends JavaPlugin implements Listener {
         return BigDecimal.valueOf(d).setScale(2, RoundingMode.HALF_UP)
                 .movePointRight(2).longValueExact();
     }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  FORMATTING
-    // ═══════════════════════════════════════════════════════════════
 
     public static String fmt(long cents) {
         double v = cents / 100.0;
@@ -225,10 +186,6 @@ public final class NexusStats extends JavaPlugin implements Listener {
             return toCents(v);
         } catch (NumberFormatException ex) { return -1; }
     }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  SCOREBOARD
-    // ═══════════════════════════════════════════════════════════════
 
     @EventHandler
     public void onJoin(PlayerJoinEvent e) {
@@ -324,10 +281,6 @@ public final class NexusStats extends JavaPlugin implements Listener {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    //  PERSISTENCE
-    // ═══════════════════════════════════════════════════════════════
-
     private void loadBalances() {
         if (!dataFile.exists()) return;
         YamlConfiguration y = YamlConfiguration.loadConfiguration(dataFile);
@@ -347,10 +300,6 @@ public final class NexusStats extends JavaPlugin implements Listener {
             getLogger().severe("FAILED to save balances.yml: " + ex.getMessage());
         }
     }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  COMMAND HANDLERS
-    // ═══════════════════════════════════════════════════════════════
 
     private void cmdBalance(CommandSender s, String[] a) {
         if (a.length == 0) {
