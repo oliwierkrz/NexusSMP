@@ -1,0 +1,10 @@
+name: NexusStats
+version: 1.0.0
+main: at.nexus.stats.NexusStats
+api-version: '1.21'
+description: Economy and scoreboard for NexusSMP
+author: NexusSMP
+
+permissions:
+  nexus.eco.admin:
+    default: op
