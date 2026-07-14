@@ -1,5 +1,8 @@
 package at.nexus.stats;
 
+import io.papermc.paper.command.brigadier.BasicCommand;
+import io.papermc.paper.command.brigadier.CommandSourceStack;
+import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
@@ -7,7 +10,7 @@ import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.Statistic;
-import org.bukkit.command.*;
+import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -19,6 +22,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.scoreboard.*;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.File;
 import java.io.IOException;
@@ -33,32 +37,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *  NexusStats  -  Economy + Scoreboard        [PLUGIN 1 of 3]
  * ═══════════════════════════════════════════════════════════════════
  *
- *  Standalone plugin. Drop the JAR into plugins/.
- *
- *  Must load BEFORE NexusShop and NexusSell - they find it
- *  automatically via Bukkit's ServicesManager. Nothing to wire up.
- *
- *  SIDEBAR (right side, Donut-style):
- *      NexusSMP          <- bold, blue
- *      ─────────
- *      Balance
- *      $50k              <- 50000 becomes "50k"
- *
- *      Playtime
- *      10 hours          <- or "1 day" / "3 days"
- *
- *      Online: 12
- *      ─────────
- *
- *  PERFORMANCE:
- *   - Updates once per second, not every tick.
- *   - Board is built ONCE; only the text changes afterwards.
- *     Never rebuilt -> no flicker.
- *   - Saving is async and only runs when something actually changed.
+ *  Commands are registered IN CODE via Paper's Brigadier lifecycle -
+ *  NOT through any YAML file. This works whether the manifest is
+ *  plugin.yml or paper-plugin.yml, so the whole "Paper plugins don't
+ *  support YAML commands" crash can never happen again.
  * ═══════════════════════════════════════════════════════════════════
  */
-public final class NexusStats extends JavaPlugin
-        implements Listener, CommandExecutor, TabCompleter {
+public final class NexusStats extends JavaPlugin implements Listener {
 
     // ── Blue theme ──────────────────────────────────────────────────
     public static final TextColor BLUE_BRIGHT = TextColor.fromHexString("#4FC3F7");
@@ -67,7 +52,7 @@ public final class NexusStats extends JavaPlugin
     public static final TextColor GREY        = TextColor.fromHexString("#9E9E9E");
     public static final TextColor WHITE       = TextColor.fromHexString("#FFFFFF");
 
-    /** Balance in CENTS as long. Never use double for money - reason at the bottom. */
+    /** Balance in CENTS as long. Never use double for money. */
     private final Map<UUID, Long> balances = new ConcurrentHashMap<>();
     private final Map<UUID, Board> boards  = new ConcurrentHashMap<>();
     private final AtomicBoolean dirty      = new AtomicBoolean(false);
@@ -83,18 +68,24 @@ public final class NexusStats extends JavaPlugin
         this.dataFile = new File(getDataFolder(), "balances.yml");
         loadBalances();
 
-        // ═══ This is the important bit ═══
-        // We register as a service. Shop and Sell grab it via
-        // Bukkit.getServicesManager().load(NexusBank.class).
-        // That way none of the three files needs to import another.
+        // Register as a service so NexusShop/NexusSell can find us.
         Bukkit.getServicesManager().register(
                 NexusBank.class, new BankImpl(), this, ServicePriority.Normal);
 
         getServer().getPluginManager().registerEvents(this, this);
-        for (String c : new String[]{"balance", "pay", "baltop", "eco"}) {
-            var cmd = getCommand(c);
-            if (cmd != null) { cmd.setExecutor(this); cmd.setTabCompleter(this); }
-        }
+
+        // ═══ Commands registered IN CODE (no YAML) ═══
+        this.getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, event -> {
+            var commands = event.registrar();
+            commands.register("balance", "Show your balance", List.of("bal", "money"),
+                    new SimpleCmd(this::cmdBalance));
+            commands.register("pay", "Send money to a player",
+                    new SimpleCmd(this::cmdPay));
+            commands.register("baltop", "Richest players",
+                    new SimpleCmd((s, a) -> cmdBaltop(s)));
+            commands.register("eco", "Manage the economy",
+                    new SimpleCmd(this::cmdEco));
+        });
 
         boardTask = Bukkit.getScheduler().runTaskTimer(this, this::tickBoards, 20L, 20L);
         saveTask  = Bukkit.getScheduler().runTaskTimerAsynchronously(
@@ -112,15 +103,28 @@ public final class NexusStats extends JavaPlugin
     public void onDisable() {
         if (boardTask != null) boardTask.cancel();
         if (saveTask  != null) saveTask.cancel();
-        save();                                   // Shutdown: SYNC, otherwise money is lost
+        save();
         boards.values().forEach(Board::destroy);
         boards.clear();
         Bukkit.getServicesManager().unregisterAll(this);
     }
 
+    /**
+     * Tiny adapter: lets us hand a (sender, args) lambda to Paper's
+     * Brigadier command registrar without writing a class per command.
+     */
+    private static final class SimpleCmd implements BasicCommand {
+        interface Handler { void run(CommandSender sender, String[] args); }
+        private final Handler handler;
+        SimpleCmd(Handler handler) { this.handler = handler; }
+        @Override
+        public void execute(@NotNull CommandSourceStack stack, @NotNull String[] args) {
+            handler.run(stack.getSender(), args);
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
-    //  SERVICE INTERFACE  -  how Shop and Sell talk to us.
-    //  Must be identical in all three files (it is).
+    //  SERVICE INTERFACE  (identical in Shop and Sell)
     // ═══════════════════════════════════════════════════════════════
     public interface NexusBank {
         long getCents(UUID id);
@@ -148,15 +152,10 @@ public final class NexusStats extends JavaPlugin
 
     private void deposit(UUID id, long cents) {
         if (cents <= 0) return;
-        balances.merge(id, cents, Long::sum);      // atomic
+        balances.merge(id, cents, Long::sum);
         dirty.set(true);
     }
 
-    /**
-     * @return false if not enough funds - nothing is deducted in that case.
-     * compute() is atomic: stops two simultaneous purchases from both
-     * going through when only one is actually covered.
-     */
     private boolean withdraw(UUID id, long cents) {
         if (cents <= 0) return true;
         final boolean[] ok = {false};
@@ -176,7 +175,7 @@ public final class NexusStats extends JavaPlugin
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  FORMATTING  -  50000 -> "50k"   1500000 -> "1.5M"
+    //  FORMATTING
     // ═══════════════════════════════════════════════════════════════
 
     public static String fmt(long cents) {
@@ -193,31 +192,22 @@ public final class NexusStats extends JavaPlugin
         return neg ? "-" + s : s;
     }
 
-    /** 1.0 -> "1"  |  1.5 -> "1.5"   (no pointless ".0") */
     private static String trim(double d) {
         double r = Math.round(d * 10.0) / 10.0;
         return (r == Math.floor(r)) ? String.valueOf((long) r)
                                     : String.format("%.1f", r);
     }
 
-    /**
-     * Playtime exactly as requested.
-     * Correct singular/plural: "1 day" vs "3 days", "1 hour" vs "10 hours".
-     */
     public static String playtime(Player p) {
-        int ticks = p.getStatistic(Statistic.PLAY_ONE_MINUTE);   // vanilla stat, in ticks
+        int ticks = p.getStatistic(Statistic.PLAY_ONE_MINUTE);
         long min = ticks / 20L / 60L;
-
         long days = min / 1440L;
         if (days >= 1) return days + (days == 1 ? " day" : " days");
-
         long hours = min / 60L;
         if (hours >= 1) return hours + (hours == 1 ? " hour" : " hours");
-
         return min + (min == 1 ? " minute" : " minutes");
     }
 
-    /** Understands "500", "50k", "1.5M", "2b". -1 = invalid. */
     public static long parseAmount(String in) {
         if (in == null || in.isBlank()) return -1;
         String s = in.trim().toLowerCase().replace(",", ".").replace("$", "");
@@ -260,11 +250,6 @@ public final class NexusStats extends JavaPlugin
         }
     }
 
-    /**
-     * Anti-flicker trick: each line is a Team whose entry is an
-     * invisible colour code. On update we only overwrite the team
-     * prefix - the board itself is NEVER rebuilt.
-     */
     private static final class Board {
         private static final String[] KEYS =
                 {"§0","§1","§2","§3","§4","§5","§6","§7","§8"};
@@ -281,7 +266,6 @@ public final class NexusStats extends JavaPlugin
             this.plugin = plugin;
             this.board  = Bukkit.getScoreboardManager().getNewScoreboard();
 
-            // ── Title: NexusSMP, bold, two-tone blue ──
             Component title = Component.text()
                     .append(Component.text("Nexus", BLUE_BRIGHT, TextDecoration.BOLD))
                     .append(Component.text("SMP",   BLUE_DEEP,   TextDecoration.BOLD))
@@ -294,17 +278,14 @@ public final class NexusStats extends JavaPlugin
                 Team t = board.registerNewTeam("l" + i);
                 t.addEntry(KEYS[i]);
                 lines[i] = t;
-                obj.getScore(KEYS[i]).setScore(KEYS.length - i);  // higher = further up
+                obj.getScore(KEYS[i]).setScore(KEYS.length - i);
             }
 
             set(0, Component.text("                  ", GREY, TextDecoration.STRIKETHROUGH));
             set(1, Component.text("Balance",  BLUE_BRIGHT, TextDecoration.BOLD));
-            // 2 = money    (dynamic)
             set(3, Component.empty());
             set(4, Component.text("Playtime", BLUE_BRIGHT, TextDecoration.BOLD));
-            // 5 = playtime (dynamic)
             set(6, Component.empty());
-            // 7 = online   (dynamic)
             set(8, Component.text("                  ", GREY, TextDecoration.STRIKETHROUGH));
 
             p.setScoreboard(board);
@@ -313,7 +294,6 @@ public final class NexusStats extends JavaPlugin
 
         private void set(int i, Component c) { lines[i].prefix(c); }
 
-        /** Once a second. Only writes when the value ACTUALLY changed. */
         void update(Player p) {
             String bal = fmt(plugin.balance(p.getUniqueId()));
             if (!bal.equals(lastBal)) {
@@ -322,13 +302,11 @@ public final class NexusStats extends JavaPlugin
                         .append(Component.text("$", MONEY, TextDecoration.BOLD))
                         .append(Component.text(bal, WHITE)).build());
             }
-
             String time = playtime(p);
             if (!time.equals(lastTime)) {
                 lastTime = time;
                 set(5, Component.text(time, WHITE));
             }
-
             int online = Bukkit.getOnlinePlayers().size();
             if (online != lastOnline) {
                 lastOnline = online;
@@ -353,12 +331,10 @@ public final class NexusStats extends JavaPlugin
     private void loadBalances() {
         if (!dataFile.exists()) return;
         YamlConfiguration y = YamlConfiguration.loadConfiguration(dataFile);
-        int bad = 0;
         for (String k : y.getKeys(false)) {
             try { balances.put(UUID.fromString(k), y.getLong(k)); }
-            catch (IllegalArgumentException ex) { bad++; }
+            catch (IllegalArgumentException ignored) { }
         }
-        if (bad > 0) getLogger().warning(bad + " invalid entries skipped in balances.yml");
     }
 
     private void save() {
@@ -373,115 +349,94 @@ public final class NexusStats extends JavaPlugin
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  COMMANDS
+    //  COMMAND HANDLERS
     // ═══════════════════════════════════════════════════════════════
 
-    @Override
-    public boolean onCommand(@NotNull CommandSender s, @NotNull Command c,
-                             @NotNull String label, @NotNull String[] a) {
-        switch (c.getName().toLowerCase()) {
-
-            case "balance" -> {
-                if (a.length == 0) {
-                    if (!(s instanceof Player p)) {
-                        s.sendMessage(Component.text("Usage: /balance <player>", NamedTextColor.RED));
-                        return true;
-                    }
-                    msgBal(s, "Your balance: ", balance(p.getUniqueId()));
-                    return true;
-                }
-                OfflinePlayer t = Bukkit.getOfflinePlayer(a[0]);
-                if (!t.hasPlayedBefore() && !t.isOnline()) {
-                    s.sendMessage(Component.text("Player not found.", NamedTextColor.RED));
-                    return true;
-                }
-                msgBal(s, t.getName() + ": ", balance(t.getUniqueId()));
+    private void cmdBalance(CommandSender s, String[] a) {
+        if (a.length == 0) {
+            if (!(s instanceof Player p)) {
+                s.sendMessage(Component.text("Usage: /balance <player>", NamedTextColor.RED));
+                return;
             }
-
-            case "pay" -> {
-                if (!(s instanceof Player p)) {
-                    s.sendMessage(Component.text("Players only.", NamedTextColor.RED));
-                    return true;
-                }
-                if (a.length < 2) {
-                    s.sendMessage(Component.text("Usage: /pay <player> <amount>", NamedTextColor.RED));
-                    return true;
-                }
-                Player t = Bukkit.getPlayerExact(a[0]);
-                if (t == null) {
-                    s.sendMessage(Component.text("That player is not online.", NamedTextColor.RED));
-                    return true;
-                }
-                if (t.getUniqueId().equals(p.getUniqueId())) {
-                    s.sendMessage(Component.text("You can't pay yourself.", NamedTextColor.RED));
-                    return true;
-                }
-                long cents = parseAmount(a[1]);
-                if (cents <= 0) {
-                    s.sendMessage(Component.text("Invalid amount. Example: /pay Steve 50k", NamedTextColor.RED));
-                    return true;
-                }
-                if (!withdraw(p.getUniqueId(), cents)) {
-                    s.sendMessage(Component.text("You don't have enough money.", NamedTextColor.RED));
-                    return true;
-                }
-                deposit(t.getUniqueId(), cents);
-                msgBal(p, "Sent to " + t.getName() + ": ", cents);
-                msgBal(t, "Received from " + p.getName() + ": ", cents);
-            }
-
-            case "baltop" -> {
-                List<Map.Entry<UUID, Long>> top = new ArrayList<>(balances.entrySet());
-                top.sort(Map.Entry.<UUID, Long>comparingByValue().reversed());
-                s.sendMessage(Component.text("── NexusSMP Baltop ──", BLUE_BRIGHT, TextDecoration.BOLD));
-                for (int i = 0; i < Math.min(10, top.size()); i++) {
-                    var e = top.get(i);
-                    String n = Bukkit.getOfflinePlayer(e.getKey()).getName();
-                    s.sendMessage(Component.text()
-                            .append(Component.text("#" + (i + 1) + " ", BLUE_DEEP, TextDecoration.BOLD))
-                            .append(Component.text((n == null ? "?" : n) + " ", WHITE))
-                            .append(Component.text("$" + fmt(e.getValue()), MONEY)).build());
-                }
-            }
-
-            case "eco" -> {
-                if (!s.hasPermission("nexus.eco.admin")) {
-                    s.sendMessage(Component.text("No permission.", NamedTextColor.RED));
-                    return true;
-                }
-                if (a.length < 3) {
-                    s.sendMessage(Component.text("/eco <give|take|set> <player> <amount>", NamedTextColor.RED));
-                    return true;
-                }
-                OfflinePlayer t = Bukkit.getOfflinePlayer(a[1]);
-                if (!t.hasPlayedBefore() && !t.isOnline()) {
-                    s.sendMessage(Component.text("Player not found.", NamedTextColor.RED));
-                    return true;
-                }
-                long cents = parseAmount(a[2]);
-                if (cents < 0) {
-                    s.sendMessage(Component.text("Invalid amount.", NamedTextColor.RED));
-                    return true;
-                }
-                UUID id = t.getUniqueId();
-                switch (a[0].toLowerCase()) {
-                    case "give" -> { deposit(id, cents);
-                        msgBal(s, "Gave " + t.getName() + ": ", cents); }
-                    case "take" -> {
-                        if (!withdraw(id, cents)) {
-                            s.sendMessage(Component.text("That player doesn't have enough money.", NamedTextColor.RED));
-                            return true;
-                        }
-                        msgBal(s, "Took from " + t.getName() + ": ", cents);
-                    }
-                    case "set"  -> { balances.put(id, Math.max(0, cents)); dirty.set(true);
-                        msgBal(s, t.getName() + " now has ", cents); }
-                    default -> s.sendMessage(Component.text("/eco <give|take|set> <player> <amount>", NamedTextColor.RED));
-                }
-            }
-            default -> { return false; }
+            msgBal(s, "Your balance: ", balance(p.getUniqueId()));
+            return;
         }
-        return true;
+        OfflinePlayer t = Bukkit.getOfflinePlayer(a[0]);
+        if (!t.hasPlayedBefore() && !t.isOnline()) {
+            s.sendMessage(Component.text("Player not found.", NamedTextColor.RED));
+            return;
+        }
+        msgBal(s, t.getName() + ": ", balance(t.getUniqueId()));
+    }
+
+    private void cmdPay(CommandSender s, String[] a) {
+        if (!(s instanceof Player p)) {
+            s.sendMessage(Component.text("Players only.", NamedTextColor.RED)); return;
+        }
+        if (a.length < 2) {
+            s.sendMessage(Component.text("Usage: /pay <player> <amount>", NamedTextColor.RED)); return;
+        }
+        Player t = Bukkit.getPlayerExact(a[0]);
+        if (t == null) {
+            s.sendMessage(Component.text("That player is not online.", NamedTextColor.RED)); return;
+        }
+        if (t.getUniqueId().equals(p.getUniqueId())) {
+            s.sendMessage(Component.text("You can't pay yourself.", NamedTextColor.RED)); return;
+        }
+        long cents = parseAmount(a[1]);
+        if (cents <= 0) {
+            s.sendMessage(Component.text("Invalid amount. Example: /pay Steve 50k", NamedTextColor.RED)); return;
+        }
+        if (!withdraw(p.getUniqueId(), cents)) {
+            s.sendMessage(Component.text("You don't have enough money.", NamedTextColor.RED)); return;
+        }
+        deposit(t.getUniqueId(), cents);
+        msgBal(p, "Sent to " + t.getName() + ": ", cents);
+        msgBal(t, "Received from " + p.getName() + ": ", cents);
+    }
+
+    private void cmdBaltop(CommandSender s) {
+        List<Map.Entry<UUID, Long>> top = new ArrayList<>(balances.entrySet());
+        top.sort(Map.Entry.<UUID, Long>comparingByValue().reversed());
+        s.sendMessage(Component.text("── NexusSMP Baltop ──", BLUE_BRIGHT, TextDecoration.BOLD));
+        for (int i = 0; i < Math.min(10, top.size()); i++) {
+            var e = top.get(i);
+            String n = Bukkit.getOfflinePlayer(e.getKey()).getName();
+            s.sendMessage(Component.text()
+                    .append(Component.text("#" + (i + 1) + " ", BLUE_DEEP, TextDecoration.BOLD))
+                    .append(Component.text((n == null ? "?" : n) + " ", WHITE))
+                    .append(Component.text("$" + fmt(e.getValue()), MONEY)).build());
+        }
+    }
+
+    private void cmdEco(CommandSender s, String[] a) {
+        if (!s.hasPermission("nexus.eco.admin")) {
+            s.sendMessage(Component.text("No permission.", NamedTextColor.RED)); return;
+        }
+        if (a.length < 3) {
+            s.sendMessage(Component.text("/eco <give|take|set> <player> <amount>", NamedTextColor.RED)); return;
+        }
+        OfflinePlayer t = Bukkit.getOfflinePlayer(a[1]);
+        if (!t.hasPlayedBefore() && !t.isOnline()) {
+            s.sendMessage(Component.text("Player not found.", NamedTextColor.RED)); return;
+        }
+        long cents = parseAmount(a[2]);
+        if (cents < 0) {
+            s.sendMessage(Component.text("Invalid amount.", NamedTextColor.RED)); return;
+        }
+        UUID id = t.getUniqueId();
+        switch (a[0].toLowerCase()) {
+            case "give" -> { deposit(id, cents); msgBal(s, "Gave " + t.getName() + ": ", cents); }
+            case "take" -> {
+                if (!withdraw(id, cents)) {
+                    s.sendMessage(Component.text("That player doesn't have enough money.", NamedTextColor.RED)); return;
+                }
+                msgBal(s, "Took from " + t.getName() + ": ", cents);
+            }
+            case "set"  -> { balances.put(id, Math.max(0, cents)); dirty.set(true);
+                msgBal(s, t.getName() + " now has ", cents); }
+            default -> s.sendMessage(Component.text("/eco <give|take|set> <player> <amount>", NamedTextColor.RED));
+        }
     }
 
     private void msgBal(CommandSender s, String prefix, long cents) {
@@ -489,18 +444,5 @@ public final class NexusStats extends JavaPlugin
                 .append(Component.text(prefix, BLUE_BRIGHT))
                 .append(Component.text("$" + fmt(cents), MONEY, TextDecoration.BOLD))
                 .build());
-    }
-
-    @Override
-    public List<String> onTabComplete(@NotNull CommandSender s, @NotNull Command c,
-                                      @NotNull String label, @NotNull String[] a) {
-        if (c.getName().equalsIgnoreCase("eco") && a.length == 1)
-            return List.of("give", "take", "set");
-        if (a.length == 1 || (c.getName().equalsIgnoreCase("eco") && a.length == 2)) {
-            List<String> n = new ArrayList<>();
-            for (Player p : Bukkit.getOnlinePlayers()) n.add(p.getName());
-            return n;
-        }
-        return Collections.emptyList();
     }
 }
