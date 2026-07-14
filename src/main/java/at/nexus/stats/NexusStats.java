@@ -30,45 +30,44 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * ═══════════════════════════════════════════════════════════════════
- *  NexusStats  -  Economy + Scoreboard        [PLUGIN 1 von 3]
+ *  NexusStats  -  Economy + Scoreboard        [PLUGIN 1 of 3]
  * ═══════════════════════════════════════════════════════════════════
  *
- *  EIGENSTAENDIGES PLUGIN. Einfach als JAR in plugins/ ziehen.
+ *  Standalone plugin. Drop the JAR into plugins/.
  *
- *  Muss ZUERST laufen - NexusShop und NexusSell brauchen es.
- *  Sie finden es automatisch ueber Bukkits ServicesManager,
- *  du musst NICHTS verbinden oder importieren.
+ *  Must load BEFORE NexusShop and NexusSell - they find it
+ *  automatically via Bukkit's ServicesManager. Nothing to wire up.
  *
- *  ANZEIGE (rechts im Bild, Donut-Style):
- *      NexusSMP          <- fett, blau
+ *  SIDEBAR (right side, Donut-style):
+ *      NexusSMP          <- bold, blue
  *      ─────────
  *      Balance
- *      $50k              <- 50000 wird zu "50k"
+ *      $50k              <- 50000 becomes "50k"
  *
  *      Playtime
- *      10 hours          <- oder "1 day" / "3 days"
+ *      10 hours          <- or "1 day" / "3 days"
  *
  *      Online: 12
  *      ─────────
  *
  *  PERFORMANCE:
- *   - Update 1x pro Sekunde, nicht jeden Tick.
- *   - Board wird EINMAL gebaut, danach nur Text geaendert.
- *     Kein Neuaufbau -> kein Flackern.
- *   - Speichern async, nur bei echten Aenderungen (dirty-Flag).
+ *   - Updates once per second, not every tick.
+ *   - Board is built ONCE; only the text changes afterwards.
+ *     Never rebuilt -> no flicker.
+ *   - Saving is async and only runs when something actually changed.
  * ═══════════════════════════════════════════════════════════════════
  */
 public final class NexusStats extends JavaPlugin
         implements Listener, CommandExecutor, TabCompleter {
 
-    // ── Blaues Theme ────────────────────────────────────────────────
+    // ── Blue theme ──────────────────────────────────────────────────
     public static final TextColor BLUE_BRIGHT = TextColor.fromHexString("#4FC3F7");
     public static final TextColor BLUE_DEEP   = TextColor.fromHexString("#0D47A1");
     public static final TextColor MONEY       = TextColor.fromHexString("#00E676");
     public static final TextColor GREY        = TextColor.fromHexString("#9E9E9E");
     public static final TextColor WHITE       = TextColor.fromHexString("#FFFFFF");
 
-    /** Kontostand in CENTS als long. Niemals double fuer Geld - Grund am Dateiende. */
+    /** Balance in CENTS as long. Never use double for money - reason at the bottom. */
     private final Map<UUID, Long> balances = new ConcurrentHashMap<>();
     private final Map<UUID, Board> boards  = new ConcurrentHashMap<>();
     private final AtomicBoolean dirty      = new AtomicBoolean(false);
@@ -84,10 +83,10 @@ public final class NexusStats extends JavaPlugin
         this.dataFile = new File(getDataFolder(), "balances.yml");
         loadBalances();
 
-        // ═══ HIER passiert die Magie ═══
-        // Wir melden uns als Service an. Shop und Sell holen sich das
-        // per Bukkit.getServicesManager().load(NexusBank.class).
-        // Dadurch braucht KEINE der drei Dateien die andere zu importieren.
+        // ═══ This is the important bit ═══
+        // We register as a service. Shop and Sell grab it via
+        // Bukkit.getServicesManager().load(NexusBank.class).
+        // That way none of the three files needs to import another.
         Bukkit.getServicesManager().register(
                 NexusBank.class, new BankImpl(), this, ServicePriority.Normal);
 
@@ -106,22 +105,22 @@ public final class NexusStats extends JavaPlugin
             ensure(p.getUniqueId());
             boards.put(p.getUniqueId(), new Board(p, this));
         }
-        getLogger().info("NexusStats aktiv. " + balances.size() + " Konten.");
+        getLogger().info("NexusStats enabled. " + balances.size() + " accounts loaded.");
     }
 
     @Override
     public void onDisable() {
         if (boardTask != null) boardTask.cancel();
         if (saveTask  != null) saveTask.cancel();
-        save();                                   // Shutdown: SYNCHRON, sonst Geldverlust
+        save();                                   // Shutdown: SYNC, otherwise money is lost
         boards.values().forEach(Board::destroy);
         boards.clear();
         Bukkit.getServicesManager().unregisterAll(this);
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  SERVICE-INTERFACE  - Shop und Sell reden hierueber mit uns.
-    //  Muss in ALLEN DREI Dateien identisch sein (ist es).
+    //  SERVICE INTERFACE  -  how Shop and Sell talk to us.
+    //  Must be identical in all three files (it is).
     // ═══════════════════════════════════════════════════════════════
     public interface NexusBank {
         long getCents(UUID id);
@@ -131,10 +130,10 @@ public final class NexusStats extends JavaPlugin
     }
 
     private final class BankImpl implements NexusBank {
-        @Override public long getCents(UUID id)  { return balance(id); }
-        @Override public void give(UUID id, long c) { deposit(id, c); }
+        @Override public long getCents(UUID id)        { return balance(id); }
+        @Override public void give(UUID id, long c)    { deposit(id, c); }
         @Override public boolean take(UUID id, long c) { return withdraw(id, c); }
-        @Override public String format(long c)   { return fmt(c); }
+        @Override public String format(long c)         { return fmt(c); }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -149,14 +148,14 @@ public final class NexusStats extends JavaPlugin
 
     private void deposit(UUID id, long cents) {
         if (cents <= 0) return;
-        balances.merge(id, cents, Long::sum);      // atomar
+        balances.merge(id, cents, Long::sum);      // atomic
         dirty.set(true);
     }
 
     /**
-     * @return false wenn nicht gedeckt - dann wurde NICHTS abgezogen.
-     * compute() ist atomar: verhindert, dass zwei gleichzeitige Kaeufe
-     * beide durchgehen obwohl nur einer gedeckt waere.
+     * @return false if not enough funds - nothing is deducted in that case.
+     * compute() is atomic: stops two simultaneous purchases from both
+     * going through when only one is actually covered.
      */
     private boolean withdraw(UUID id, long cents) {
         if (cents <= 0) return true;
@@ -177,7 +176,7 @@ public final class NexusStats extends JavaPlugin
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  FORMAT  -  50000 -> "50k"   1500000 -> "1.5M"
+    //  FORMATTING  -  50000 -> "50k"   1500000 -> "1.5M"
     // ═══════════════════════════════════════════════════════════════
 
     public static String fmt(long cents) {
@@ -194,7 +193,7 @@ public final class NexusStats extends JavaPlugin
         return neg ? "-" + s : s;
     }
 
-    /** 1.0 -> "1"  |  1.5 -> "1.5"   (keine sinnlose ".0") */
+    /** 1.0 -> "1"  |  1.5 -> "1.5"   (no pointless ".0") */
     private static String trim(double d) {
         double r = Math.round(d * 10.0) / 10.0;
         return (r == Math.floor(r)) ? String.valueOf((long) r)
@@ -202,11 +201,11 @@ public final class NexusStats extends JavaPlugin
     }
 
     /**
-     * Playtime EXAKT wie gewuenscht.
-     * Singular/Plural korrekt: "1 day" vs "3 days", "1 hour" vs "10 hours".
+     * Playtime exactly as requested.
+     * Correct singular/plural: "1 day" vs "3 days", "1 hour" vs "10 hours".
      */
     public static String playtime(Player p) {
-        int ticks = p.getStatistic(Statistic.PLAY_ONE_MINUTE);   // Vanilla-Stat, in Ticks
+        int ticks = p.getStatistic(Statistic.PLAY_ONE_MINUTE);   // vanilla stat, in ticks
         long min = ticks / 20L / 60L;
 
         long days = min / 1440L;
@@ -218,7 +217,7 @@ public final class NexusStats extends JavaPlugin
         return min + (min == 1 ? " minute" : " minutes");
     }
 
-    /** Versteht "500", "50k", "1.5M", "2b". -1 = ungueltig. */
+    /** Understands "500", "50k", "1.5M", "2b". -1 = invalid. */
     public static long parseAmount(String in) {
         if (in == null || in.isBlank()) return -1;
         String s = in.trim().toLowerCase().replace(",", ".").replace("$", "");
@@ -262,10 +261,9 @@ public final class NexusStats extends JavaPlugin
     }
 
     /**
-     * TRICK gegen Flackern: Jede Zeile ist ein Team mit einem
-     * unsichtbaren Farbcode als Entry. Beim Update wird nur der
-     * Team-Prefix ueberschrieben - das Board selbst wird NIE
-     * neu aufgebaut.
+     * Anti-flicker trick: each line is a Team whose entry is an
+     * invisible colour code. On update we only overwrite the team
+     * prefix - the board itself is NEVER rebuilt.
      */
     private static final class Board {
         private static final String[] KEYS =
@@ -283,7 +281,7 @@ public final class NexusStats extends JavaPlugin
             this.plugin = plugin;
             this.board  = Bukkit.getScoreboardManager().getNewScoreboard();
 
-            // ── Titel: NexusSMP, fett, zweifarbig blau ──
+            // ── Title: NexusSMP, bold, two-tone blue ──
             Component title = Component.text()
                     .append(Component.text("Nexus", BLUE_BRIGHT, TextDecoration.BOLD))
                     .append(Component.text("SMP",   BLUE_DEEP,   TextDecoration.BOLD))
@@ -296,17 +294,17 @@ public final class NexusStats extends JavaPlugin
                 Team t = board.registerNewTeam("l" + i);
                 t.addEntry(KEYS[i]);
                 lines[i] = t;
-                obj.getScore(KEYS[i]).setScore(KEYS.length - i);  // hoeher = weiter oben
+                obj.getScore(KEYS[i]).setScore(KEYS.length - i);  // higher = further up
             }
 
             set(0, Component.text("                  ", GREY, TextDecoration.STRIKETHROUGH));
             set(1, Component.text("Balance",  BLUE_BRIGHT, TextDecoration.BOLD));
-            // 2 = Geld     (dynamisch)
+            // 2 = money    (dynamic)
             set(3, Component.empty());
             set(4, Component.text("Playtime", BLUE_BRIGHT, TextDecoration.BOLD));
-            // 5 = Playtime (dynamisch)
+            // 5 = playtime (dynamic)
             set(6, Component.empty());
-            // 7 = Online   (dynamisch)
+            // 7 = online   (dynamic)
             set(8, Component.text("                  ", GREY, TextDecoration.STRIKETHROUGH));
 
             p.setScoreboard(board);
@@ -315,7 +313,7 @@ public final class NexusStats extends JavaPlugin
 
         private void set(int i, Component c) { lines[i].prefix(c); }
 
-        /** 1x/Sekunde. Schreibt nur bei ECHTER Aenderung. */
+        /** Once a second. Only writes when the value ACTUALLY changed. */
         void update(Player p) {
             String bal = fmt(plugin.balance(p.getUniqueId()));
             if (!bal.equals(lastBal)) {
@@ -349,7 +347,7 @@ public final class NexusStats extends JavaPlugin
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  PERSISTENZ
+    //  PERSISTENCE
     // ═══════════════════════════════════════════════════════════════
 
     private void loadBalances() {
@@ -360,7 +358,7 @@ public final class NexusStats extends JavaPlugin
             try { balances.put(UUID.fromString(k), y.getLong(k)); }
             catch (IllegalArgumentException ex) { bad++; }
         }
-        if (bad > 0) getLogger().warning(bad + " ungueltige Eintraege uebersprungen.");
+        if (bad > 0) getLogger().warning(bad + " invalid entries skipped in balances.yml");
     }
 
     private void save() {
@@ -370,7 +368,7 @@ public final class NexusStats extends JavaPlugin
             if (!getDataFolder().exists()) getDataFolder().mkdirs();
             y.save(dataFile);
         } catch (IOException ex) {
-            getLogger().severe("balances.yml NICHT gespeichert: " + ex.getMessage());
+            getLogger().severe("FAILED to save balances.yml: " + ex.getMessage());
         }
     }
 
@@ -386,15 +384,15 @@ public final class NexusStats extends JavaPlugin
             case "balance" -> {
                 if (a.length == 0) {
                     if (!(s instanceof Player p)) {
-                        s.sendMessage(Component.text("Nutzung: /balance <Spieler>", NamedTextColor.RED));
+                        s.sendMessage(Component.text("Usage: /balance <player>", NamedTextColor.RED));
                         return true;
                     }
-                    msgBal(s, "Dein Kontostand: ", balance(p.getUniqueId()));
+                    msgBal(s, "Your balance: ", balance(p.getUniqueId()));
                     return true;
                 }
                 OfflinePlayer t = Bukkit.getOfflinePlayer(a[0]);
                 if (!t.hasPlayedBefore() && !t.isOnline()) {
-                    s.sendMessage(Component.text("Spieler nicht gefunden.", NamedTextColor.RED));
+                    s.sendMessage(Component.text("Player not found.", NamedTextColor.RED));
                     return true;
                 }
                 msgBal(s, t.getName() + ": ", balance(t.getUniqueId()));
@@ -402,34 +400,34 @@ public final class NexusStats extends JavaPlugin
 
             case "pay" -> {
                 if (!(s instanceof Player p)) {
-                    s.sendMessage(Component.text("Nur fuer Spieler.", NamedTextColor.RED));
+                    s.sendMessage(Component.text("Players only.", NamedTextColor.RED));
                     return true;
                 }
                 if (a.length < 2) {
-                    s.sendMessage(Component.text("Nutzung: /pay <Spieler> <Betrag>", NamedTextColor.RED));
+                    s.sendMessage(Component.text("Usage: /pay <player> <amount>", NamedTextColor.RED));
                     return true;
                 }
                 Player t = Bukkit.getPlayerExact(a[0]);
                 if (t == null) {
-                    s.sendMessage(Component.text("Spieler ist nicht online.", NamedTextColor.RED));
+                    s.sendMessage(Component.text("That player is not online.", NamedTextColor.RED));
                     return true;
                 }
                 if (t.getUniqueId().equals(p.getUniqueId())) {
-                    s.sendMessage(Component.text("Du kannst dir nicht selbst Geld schicken.", NamedTextColor.RED));
+                    s.sendMessage(Component.text("You can't pay yourself.", NamedTextColor.RED));
                     return true;
                 }
                 long cents = parseAmount(a[1]);
                 if (cents <= 0) {
-                    s.sendMessage(Component.text("Ungueltiger Betrag. Bsp: /pay Steve 50k", NamedTextColor.RED));
+                    s.sendMessage(Component.text("Invalid amount. Example: /pay Steve 50k", NamedTextColor.RED));
                     return true;
                 }
                 if (!withdraw(p.getUniqueId(), cents)) {
-                    s.sendMessage(Component.text("Du hast nicht genug Geld.", NamedTextColor.RED));
+                    s.sendMessage(Component.text("You don't have enough money.", NamedTextColor.RED));
                     return true;
                 }
                 deposit(t.getUniqueId(), cents);
-                msgBal(p, "Gesendet an " + t.getName() + ": ", cents);
-                msgBal(t, "Erhalten von " + p.getName() + ": ", cents);
+                msgBal(p, "Sent to " + t.getName() + ": ", cents);
+                msgBal(t, "Received from " + p.getName() + ": ", cents);
             }
 
             case "baltop" -> {
@@ -448,37 +446,37 @@ public final class NexusStats extends JavaPlugin
 
             case "eco" -> {
                 if (!s.hasPermission("nexus.eco.admin")) {
-                    s.sendMessage(Component.text("Keine Berechtigung.", NamedTextColor.RED));
+                    s.sendMessage(Component.text("No permission.", NamedTextColor.RED));
                     return true;
                 }
                 if (a.length < 3) {
-                    s.sendMessage(Component.text("/eco <give|take|set> <Spieler> <Betrag>", NamedTextColor.RED));
+                    s.sendMessage(Component.text("/eco <give|take|set> <player> <amount>", NamedTextColor.RED));
                     return true;
                 }
                 OfflinePlayer t = Bukkit.getOfflinePlayer(a[1]);
                 if (!t.hasPlayedBefore() && !t.isOnline()) {
-                    s.sendMessage(Component.text("Spieler nicht gefunden.", NamedTextColor.RED));
+                    s.sendMessage(Component.text("Player not found.", NamedTextColor.RED));
                     return true;
                 }
                 long cents = parseAmount(a[2]);
                 if (cents < 0) {
-                    s.sendMessage(Component.text("Ungueltiger Betrag.", NamedTextColor.RED));
+                    s.sendMessage(Component.text("Invalid amount.", NamedTextColor.RED));
                     return true;
                 }
                 UUID id = t.getUniqueId();
                 switch (a[0].toLowerCase()) {
                     case "give" -> { deposit(id, cents);
-                        msgBal(s, "Gegeben an " + t.getName() + ": ", cents); }
+                        msgBal(s, "Gave " + t.getName() + ": ", cents); }
                     case "take" -> {
                         if (!withdraw(id, cents)) {
-                            s.sendMessage(Component.text("Nicht genug Geld.", NamedTextColor.RED));
+                            s.sendMessage(Component.text("That player doesn't have enough money.", NamedTextColor.RED));
                             return true;
                         }
-                        msgBal(s, "Genommen von " + t.getName() + ": ", cents);
+                        msgBal(s, "Took from " + t.getName() + ": ", cents);
                     }
                     case "set"  -> { balances.put(id, Math.max(0, cents)); dirty.set(true);
-                        msgBal(s, t.getName() + " hat jetzt ", cents); }
-                    default -> s.sendMessage(Component.text("/eco <give|take|set> <Spieler> <Betrag>", NamedTextColor.RED));
+                        msgBal(s, t.getName() + " now has ", cents); }
+                    default -> s.sendMessage(Component.text("/eco <give|take|set> <player> <amount>", NamedTextColor.RED));
                 }
             }
             default -> { return false; }
