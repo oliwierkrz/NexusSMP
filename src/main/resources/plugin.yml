@@ -1,0 +1,22 @@
+name: NexusStats
+version: 1.0.0
+main: at.nexus.stats.NexusStats
+api-version: '1.21'
+description: Economy and scoreboard for NexusSMP
+author: NexusSMP
+
+commands:
+  balance:
+    description: Show your balance
+    aliases: [bal, money]
+  pay:
+    description: Send money to a player
+  baltop:
+    description: Richest players
+  eco:
+    description: Manage the economy
+    permission: nexus.eco.admin
+
+permissions:
+  nexus.eco.admin:
+    default: op
