@@ -98,6 +98,7 @@ public final class NexusStats extends JavaPlugin implements Listener {
     // ── Public hooks for NexusSell / NexusShop (called via reflection) ──
     public void depositPublic(UUID id, long cents) { deposit(id, cents); }
     public String fmtPublic(long cents) { return fmt(cents); }
+    public boolean takePublic(UUID id, long cents) { return withdraw(id, cents); }
 
     private static final class SimpleCmd implements BasicCommand {
         interface Handler { void run(CommandSender sender, String[] args); }
