@@ -98,6 +98,11 @@ public final class NexusStats extends JavaPlugin implements Listener {
     public boolean takePublic(UUID id, long cents) { return withdraw(id, cents); }
     public String fmtPublic(long cents) { return fmt(cents); }
 
+    public long getBalancePublic(java.util.UUID id) {
+    ensure(id);
+    return balance(id);
+}
+
     private static final class SimpleCmd implements BasicCommand {
         interface Handler { void run(CommandSender sender, String[] args); }
         private final Handler handler;
